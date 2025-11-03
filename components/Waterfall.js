@@ -189,15 +189,18 @@ const Waterfall = ({
             gl.bindFramebuffer(gl.FRAMEBUFFER, framebufferRef.current);
             gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textureRef.current, 0);
             gl.viewport(0, 0, width, waterfallHeight);
-            gl.blitFramebuffer(0, 0, width, waterfallHeight, 0, 1, width, waterfallHeight + 1, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+            if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
+                gl.blitFramebuffer(0, 1, width, waterfallHeight, 0, 0, width, waterfallHeight - 1, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+            }
 
-            const normalizedFft = new Uint8Array(fftSize);
-            for (let i = 0; i < fftSize; i++) {
-                const shiftedIndex = (i + fftSize / 2) % fftSize;
+            const normalizedFft = new Uint8Array(width);
+            for (let i = 0; i < width; i++) {
+                const fftIndex = Math.floor((i / width) * fftSize);
+                const shiftedIndex = (fftIndex + fftSize / 2) % fftSize;
                 normalizedFft[i] = Math.max(0, Math.min(255, (avgFftRef.current[shiftedIndex] + 120)));
             }
             gl.bindTexture(gl.TEXTURE_2D, textureRef.current);
-            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, 1, gl.LUMINANCE, gl.UNSIGNED_BYTE, normalizedFft);
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, waterfallHeight - 1, width, 1, gl.LUMINANCE, gl.UNSIGNED_BYTE, normalizedFft);
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         }
         
