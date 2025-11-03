@@ -16,6 +16,49 @@ const DEMO_FM_STATION_HZ = 98.5;
 const DEMO_AM_STATION_HZ = 870;
 const DEMO_WEATHER_TEXT = "This is a simulated NOAA weather radio broadcast. A weak cold front will move through the region this afternoon, bringing scattered showers. Winds will be from the southwest at 10 to 15 miles per hour. Highs today in the upper 60s. Conditions will clear overnight with lows in the mid 40s.";
 
+const audioWorkletCode = `
+class SdrAudioProcessor extends AudioWorkletProcessor {
+    constructor() {
+        super();
+        this._buffer = new Float32Array(8192); // Buffer for audio data
+        this._writeIndex = 0;
+        this._readIndex = 0;
+        this._bufferSize = this._buffer.length;
+        this.port.onmessage = (event) => {
+            this.addToBuffer(event.data);
+        };
+    }
+
+    addToBuffer(data) {
+        for (let i = 0; i < data.length; i++) {
+            this._buffer[this._writeIndex] = data[i];
+            this._writeIndex = (this._writeIndex + 1) % this._bufferSize;
+            if (this._writeIndex === this._readIndex) {
+                // Buffer overflow, move read index forward to avoid locking
+                this._readIndex = (this._readIndex + 1) % this._bufferSize;
+            }
+        }
+    }
+
+    process(inputs, outputs, parameters) {
+        const outputChannel = outputs[0][0];
+        for (let i = 0; i < outputChannel.length; i++) {
+            if (this._readIndex !== this._writeIndex) {
+                outputChannel[i] = this._buffer[this._readIndex];
+                this._readIndex = (this._readIndex + 1) % this._bufferSize;
+            } else {
+                // Buffer underflow
+                outputChannel[i] = 0;
+            }
+        }
+        return true;
+    }
+}
+
+registerProcessor('sdr-audio-processor', SdrAudioProcessor);
+`;
+
+
 const sampleAircraft = [
     { icao: 0xAC824D, callsign: 'AAL2304', altitude: 32000, speed: 450, heading: 120, lastSeen: 0, unit: AltitudeUnit.FEET },
     { icao: 0xA4A273, callsign: 'SWA433', altitude: 28500, speed: 420, heading: 275, lastSeen: 0, unit: AltitudeUnit.FEET },
@@ -44,10 +87,10 @@ export const useSdr = () => {
   const activeMode = useRef('idle');
   const audioContext = useRef(null);
   const audioProcessor = useRef(null);
-  const audioQueue = useRef([]);
   const audioGain = useRef(null);
   const lastPhase = useRef(0);
   const amDcOffset = useRef(0);
+  const demoAudioTime = useRef(0);
 
   const onMessage = useCallback((msg) => {
     if (msg.crcOk && msg.icao) {
@@ -138,7 +181,9 @@ export const useSdr = () => {
         if (audioGain.current) audioGain.current.gain.value = 5.0;
     }
     
-    if (decimatedAudio) audioQueue.current.push(decimatedAudio);
+    if (decimatedAudio && audioProcessor.current) {
+        audioProcessor.current.port.postMessage(decimatedAudio);
+    }
   }, [demodulateAm, demodulateFm]);
 
   const readLoop = useCallback(async () => {
@@ -159,52 +204,30 @@ export const useSdr = () => {
     }
   }, [onMessage, processRadioSamples]);
   
-  const setupAudio = useCallback(() => {
+  const setupAudio = useCallback(async () => {
     if (!audioContext.current) {
       const isAm = activeMode.current === 'am';
       const targetSampleRate = RADIO_SAMPLE_RATE / (isAm ? AM_DECIMATION : FM_DECIMATION);
       audioContext.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });
-      audioProcessor.current = audioContext.current.createScriptProcessor(4096, 1, 1);
       audioGain.current = audioContext.current.createGain();
-      
-      audioProcessor.current.onaudioprocess = (e) => {
-        const outputBuffer = e.outputBuffer.getChannelData(0);
-        if (isDemo && activeMode.current !== 'weather_broadcast') {
-            const time = e.playbackTime;
-            for (let i = 0; i < outputBuffer.length; i++) {
-                const sampleTime = time + i / e.outputBuffer.sampleRate;
-                if (isTunedDemo) {
-                    const tone = Math.sin(sampleTime * 2 * Math.PI * 440) * (isAm ? Math.sin(sampleTime * 2 * Math.PI * 2) : 1) * 0.3;
-                    outputBuffer[i] = tone + (Math.random() * 2 - 1) * 0.02;
-                } else {
-                    outputBuffer[i] = (Math.random() * 2 - 1) * 0.1;
-                }
-            }
-            return;
-        }
 
-        if (isDemo && activeMode.current === 'weather_broadcast') {
-           for (let i = 0; i < outputBuffer.length; i++) outputBuffer[i] = (Math.random() * 2 - 1) * 0.05;
-           return;
-        }
-
-        let i = 0;
-        while(i < outputBuffer.length && audioQueue.current.length > 0) {
-          const chunk = audioQueue.current[0];
-          const toCopy = Math.min(outputBuffer.length - i, chunk.length);
-          outputBuffer.set(chunk.subarray(0, toCopy), i);
-          if(toCopy < chunk.length) { audioQueue.current[0] = chunk.subarray(toCopy); } 
-          else { audioQueue.current.shift(); }
-          i += toCopy;
-        }
-        while(i < outputBuffer.length) { outputBuffer[i++] = 0; }
-      };
-      
-      audioProcessor.current.connect(audioGain.current);
-      audioGain.current.connect(audioContext.current.destination);
+      try {
+        const workletBlob = new Blob([audioWorkletCode], { type: 'application/javascript' });
+        const workletURL = URL.createObjectURL(workletBlob);
+        await audioContext.current.audioWorklet.addModule(workletURL);
+        audioProcessor.current = new AudioWorkletNode(audioContext.current, 'sdr-audio-processor');
+        audioProcessor.current.connect(audioGain.current);
+        audioGain.current.connect(audioContext.current.destination);
+        URL.revokeObjectURL(workletURL);
+      } catch (e) {
+          console.error("Error setting up AudioWorklet:", e);
+          setError("Could not initialize audio playback: " + e.message);
+      }
     }
-    if (audioContext.current.state === 'suspended') audioContext.current.resume();
-  }, [isDemo, isTunedDemo]);
+    if (audioContext.current.state === 'suspended') {
+        await audioContext.current.resume();
+    }
+  }, []);
 
   const stopActivity = useCallback(async (isDisconnecting = false) => {
     stopReading.current = true;
@@ -215,10 +238,9 @@ export const useSdr = () => {
     if (audioContext.current && audioContext.current.state !== 'closed') {
       await audioContext.current.close().catch(console.error);
       audioContext.current = null;
-      if (audioProcessor.current) audioProcessor.current.disconnect();
       audioProcessor.current = null;
-      audioQueue.current = [];
     }
+    demoAudioTime.current = 0;
 
     setMode('idle');
     activeMode.current = 'idle';
@@ -237,6 +259,11 @@ export const useSdr = () => {
 
   const startMode = useCallback(async (newMode, freq) => {
     await stopActivity();
+    
+    if (newMode === 'idle') {
+        return;
+    }
+
     setMode(newMode);
     activeMode.current = newMode;
     setError(null);
@@ -259,7 +286,27 @@ export const useSdr = () => {
             } else if (freq) {
                 const isOnFm = newMode === 'fm' && Math.abs(freq / 1e6 - DEMO_FM_STATION_HZ) < 0.1;
                 const isOnAm = newMode === 'am' && Math.abs(freq / 1e3 - DEMO_AM_STATION_HZ) < 10;
-                setIsTunedDemo(isOnAm || isOnFm);
+                const newIsTunedDemo = isOnAm || isOnFm;
+                if (isTunedDemo !== newIsTunedDemo) setIsTunedDemo(newIsTunedDemo);
+
+                if (['fm', 'am'].includes(activeMode.current) && audioProcessor.current) {
+                    const bufferSize = 2048;
+                    const buffer = new Float32Array(bufferSize);
+                    const isAm = activeMode.current === 'am';
+                    const targetSampleRate = RADIO_SAMPLE_RATE / (isAm ? AM_DECIMATION : FM_DECIMATION);
+
+                    for (let i = 0; i < bufferSize; i++) {
+                        const sampleTime = demoAudioTime.current + i / targetSampleRate;
+                        if (newIsTunedDemo) {
+                            const tone = Math.sin(sampleTime * 2 * Math.PI * 440) * (isAm ? Math.sin(sampleTime * 2 * Math.PI * 2) : 1) * 0.3;
+                            buffer[i] = tone + (Math.random() * 2 - 1) * 0.02;
+                        } else {
+                            buffer[i] = (Math.random() * 2 - 1) * 0.1;
+                        }
+                    }
+                    demoAudioTime.current += bufferSize / targetSampleRate;
+                    audioProcessor.current.port.postMessage(buffer);
+                }
 
                 demoSignalPosition.current += demoSignalDirection.current * 2;
                 if (demoSignalPosition.current <= 100 || demoSignalPosition.current >= FFT_SIZE - 100) {
@@ -288,9 +335,12 @@ export const useSdr = () => {
                 setFftData(fakeMags);
             }
         };
+
+        if (['fm', 'am', 'weather_broadcast'].includes(newMode)) await setupAudio();
+        
         simulate();
-        simulationInterval.current = window.setInterval(simulate, 100);
-        if (['fm', 'am', 'weather_broadcast'].includes(newMode)) setupAudio();
+        simulationInterval.current = window.setInterval(simulate, 40);
+
         if (newMode === 'weather_broadcast' && window.speechSynthesis) {
             const utterance = new SpeechSynthesisUtterance(DEMO_WEATHER_TEXT);
             utterance.rate = 0.9;
@@ -313,7 +363,7 @@ export const useSdr = () => {
             await device.current.setCenterFrequency(freq || (newMode === 'adsb' ? ADS_B_FREQ : 100e6));
             
             if (newMode === 'adsb') demodulator.current = new Demodulator({ fixErrors: true, aggressive: true });
-            if (['fm', 'am', 'weather_broadcast'].includes(newMode)) setupAudio();
+            if (['fm', 'am', 'weather_broadcast'].includes(newMode)) await setupAudio();
 
             await device.current.resetBuffer();
             stopReading.current = false;
@@ -324,7 +374,7 @@ export const useSdr = () => {
             setStatus('error');
         }
     }
-  }, [isDemo, stopActivity, setupAudio, readLoop]);
+  }, [isDemo, stopActivity, setupAudio, readLoop, isTunedDemo]);
 
   const connect = useCallback(async () => {
     if (device.current) return;
