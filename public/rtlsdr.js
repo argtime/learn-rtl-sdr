@@ -17,6 +17,7 @@
     // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
     // See the License for the specific language governing permissions and
     // limitations under the License.
+    // This code has been changed
 
     var RtlCom = require('./rtlcom');
 
@@ -290,6 +291,9 @@
           [0x15, sdm & 0xff, 0xff]
         ]);
         await getPllLock(true);
+        if (!hasPllLock) {
+          throw new Error('R820T PLL failed to lock.');
+        }
         await writeRegMask(0x1a, 0x08, 0x08);
         var actualFreq = 2 * pllRef * (nint + sdm / 65536) / mixDiv;
         return (actualFreq);
