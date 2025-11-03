@@ -1,0 +1,5 @@
+{
+  "name": "Web SDR Tutorial",
+  "description": "An interactive tutorial using WebUSB and an RTL-SDR dongle to explore various radio signals, including aircraft ADS-B, broadcast FM radio, and weather satellites.",
+  "requestFramePermissions": []
+}
