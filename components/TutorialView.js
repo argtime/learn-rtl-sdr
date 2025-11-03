@@ -49,17 +49,41 @@ const TutorialView = ({ sdr, currentStep, setStep }) => {
 
     // This effect manages the SDR state based on the current tutorial step
     useEffect(() => {
-        sdr.stopActivity();
-        if(sdr.status === 'connected') {
-            switch (currentStep) {
-                case 1: sdr.startMode('spectrum_explorer', 98.5e6); break;
-                case 2: sdr.startMode('fm', 98.5e6); break;
-                case 3: sdr.startMode('am', 870e3); break;
-                case 4: sdr.startMode('adsb'); break;
-                case 5: sdr.startMode('weather_broadcast', 162.55e6); break;
-                case 6: sdr.startMode('idle'); break;
+        const manageSdrForStep = async () => {
+            // The startMode function handles stopping previous activity, so we just
+            // need to call the correct mode for the current step and ensure all
+            // async operations are properly awaited to prevent race conditions.
+            if (sdr.status === 'connected') {
+                switch (currentStep) {
+                    case 1:
+                        await sdr.startMode('spectrum_explorer', 98.5e6);
+                        break;
+                    case 2:
+                        await sdr.startMode('fm', 98.5e6);
+                        break;
+                    case 3:
+                        await sdr.startMode('am', 870e3);
+                        break;
+                    case 4:
+                        await sdr.startMode('adsb');
+                        break;
+                    case 5:
+                        await sdr.startMode('weather_broadcast', 162.55e6);
+                        break;
+                    case 6:
+                        await sdr.startMode('idle');
+                        break;
+                    default:
+                        // For any other state, ensure the SDR is idle.
+                        await sdr.startMode('idle');
+                }
+            } else {
+                // If status is not 'connected' (e.g., 'idle', 'error'), ensure everything is stopped.
+                await sdr.stopActivity();
             }
-        }
+        };
+
+        manageSdrForStep();
     // sdr object is intentionally omitted from dependencies to avoid re-triggering on every fftData update
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [currentStep, sdr.status]);
